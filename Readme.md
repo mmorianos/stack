@@ -1,4 +1,4 @@
-# Segment Stack [![CircleCI](https://circleci.com/gh/segmentio/stack.svg?style=shield&circle-token=21d1df0dfd7e405582403f65cd1a270f9f52d7a4)](https://circleci.com/gh/segmentio/stack)
+# Cox Auto AWS Stack
 
 [terraform]: https://terraform.io
 [remote-state]: https://www.terraform.io/docs/commands/remote-config.html
@@ -7,13 +7,16 @@
 [aws]: http://aws.amazon.com/
 [docker-hub]: https://hub.docker.com/
 [keypair]: http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html#having-ec2-create-your-key-pair
+[segment]: https://segment.com/blog/categories/engineering/
+[alks]: https://alks.coxautoinc.com
 
-The Segment Stack is a set of [Terraform][terraform] modules for configuring production infrastructure with AWS, Docker, and ECS.
-It's a more 'curated' set of defaults for configuring your AWS environment, while still allowing you to fully customize it.
+The Cox Auto AWS Stack is a set of [Terraform][terraform] modules for configuring production infrastructure with AWS, Docker, and ECS.  It's a more 'curated' set of defaults for configuring your AWS environment, while still allowing you to fully customize it.
+
+It's based on a set of modules done by the team at [Segment][segment].
 
 *To get more background on the Segment Stack you can read [this blog post](https://segment.com/blog/the-segment-aws-stack/) about its history.*
 
-The Stack comes with:
+The Full Stack is discussed further down and comes with:
 
 - an auto-scaling group of instances to run your services
 - a multi-az VPC with different subnets for availability
@@ -25,21 +28,145 @@ The Stack comes with:
 
 Start from scratch or selectively add it to your existing infrastructure, the Stack is yours to customize and tweak.
 
-## Quickstart
+## Creating Cox Auto Base AWS Resources
 
-_To run the stack, you'll need AWS access and Terraform installed, check out the [requirements](#requirements) section._
+### Requirements
 
-The easiest way to get the Stack up and running is by creating a Terraform definition for it, copy this snippet in a file
-named `terraform.tf`:
-```hcl
-module "stack" {
-  source      = "github.com/segmentio/stack"
-  environment = "prod"
-  key_name    = "my-key-name"
-  name        = "my-app"
+Before we start, you'll first need:
+
+- A Fresh/New Cox Auto AWS account [AWS account][aws] with API access
+- Since we are creating the initial Enterprise Assets in the new account, we can't yet use ALKS or temporary credentials. So you'll need an actual IAM user (or root, say it isn't so!) with admin like privileges to run this.
+- A keypair for SSH access to EC2 instances (we do create a Bastion Host at the moment).  Look here to learn how to [create a keypair][keypair] in AWS
+- Download and install [terraform][terraform]
+
+To create the basic building blocks of a curated, standard Cox Automotive AWS Account use the folowing directions.
+
+This is designed to be the very first thing that is done to a newly created account and is intended to be run by the Enterprise Cloup Ops team.  It sets up a standard 'integrated' VPC with 3 private/internal and 3 public/external subnets along with all the plumbing to provide the necessary network infrastructure components need to be a good corporate netizen.
+
+We're still working on the operating model, or how we'll use this among the entire team and accross hundreds of accounts but this is the basis for what we'll do.  Focus areas we need to consider are around state file management and the sharing of responsibilities across a distrubted team.  Whatever is created by the Enterprise Cloud Ops teams needs to be published in the form of a live state file (terraform.tfstate) that reflects what is really/actually provisioned in their account.  They'll use that as a basis to build upon, things that are important to the teams are, vpc-id, subnet-id's, instance-profiles, service-roles, etc.
+
+ToDo: so far we just build out a VPC and create the required ALKS roles, groups, users, and policies.  Next up, the remaining enterprise assets, CloudTrail, Config, S3 buckets and Logging, ans Splunk Forwarder (probably other stuff too).  Plenty more to do, externalize inputs for slicker automation etc.
+
+The following file is an example of what you need to build the base-aws vpc and alks IAM components.
+
+Create a directory, and drop the following into a file, say terraform.tf.  Keep in mind that if you are in a dir that has a state file, you risk destrotying infrastructure unintentionally.  Run your plans and look at the changes in the plan carefully!
+
+
+```
+provider "aws" {
+  region = "us-east-1"
+}
+
+variable "cloud_trail_bucket_name" {
+  description = "usually shortname - logs - coxautomotive"
+}
+
+variable "aws_account_id" {
+  description = "16 digit AWS account number"
+}
+
+variable "name" {
+  description = "the name of your stack, e.g. \"coxauto\""
+}
+
+variable "environment" {
+  description = "the name of your environment, e.g. \"prod-east\""
+}
+
+variable "key_name" {
+  description = "the name of the ssh key to use, e.g. \"internal-key\""
+}
+
+variable "domain_name" {
+  description = "the internal DNS name to use with services"
+  default     = "stack.local"
+}
+
+variable "domain_name_servers" {
+  description = "the internal DNS servers, defaults to the internal route53 server of the VPC"
+  default     = ""
+}
+
+variable "region" {
+  description = "the AWS region in which resources are created, you must set the availability_zones variable as well if you define this value to something other than the default"
+  default     = "us-east-1"
+}
+
+variable "cidr" {
+  description = "the CIDR block to provision for the VPC, if set to something other than the default, both internal_subnets and external_subnets have to be defined as well"
+  default     = "10.30.0.0/16"
+}
+
+variable "internal_subnets" {
+  description = "a list of CIDRs for internal subnets in your VPC, must be set if the cidr variable is defined, needs to have as many elements as there are availability zones"
+  default     = ["10.30.0.0/19" ,"10.30.64.0/19", "10.30.128.0/19"]
+}
+
+variable "external_subnets" {
+  description = "a list of CIDRs for external subnets in your VPC, must be set if the cidr variable is defined, needs to have as many elements as there are availability zones"
+  default     = ["10.30.32.0/20", "10.30.96.0/20", "10.30.160.0/20"]
+}
+
+variable "availability_zones" {
+  description = "a comma-separated list of availability zones, defaults to all AZ of the region, if set to something other than the defaults, both internal_subnets and external_subnets have to be defined as well"
+  default     = ["us-east-1a", "us-east-1b", "us-east-1d"]
+}
+
+module "vpc" {
+  source             = "git::https://Michael-Morianos:dfb41e0f7eeaad0d9b36e52f3d850f96d836b54c@ghe.coxautoinc.com/ETS-CloudAutomation/coxauto-terraform-modules//vpc"
+  name               = "${var.name}"
+  environment        = "${var.environment}"
+  cidr               = "${var.cidr}"
+  internal_subnets   = "${var.internal_subnets}"
+  external_subnets   = "${var.external_subnets}"
+  availability_zones = "${var.availability_zones}"
+}
+
+module "cai-iam" {
+  source                  = "git::https://Michael-Morianos:dfb41e0f7eeaad0d9b36e52f3d850f96d836b54c@ghe.coxautoinc.com/ETS-CloudAutomation/coxauto-terraform-modules//cai-iam"
+  aws_region              = "${var.region}"
+  cloud_trail_bucket_name = "${var.cloud_trail_bucket_name}"
+  aws_account_id          = "${var.aws_account_id}"
 }
 ```
-This is the _base_ configuration, that will provision everything you need to run your services.
+
+From there, you'll want to plan, which will stage the changeset
+
+    $ terraform plan
+
+And if the changes look good, apply them to your infrastructure
+
+    $ terraform apply
+
+## Quickstart for a complete 'full' stack
+
+The following will outline how to create the entire Cox Auto AWS stack including VPC, ECS Cluster, Bastion, etc.  If you prefer just to use a single module, or customize your stack please see the [Module Reference](#module-reference) section for examples.
+
+### Requirements
+
+Before we start, you'll first need:
+
+- A Cox Auto AWS account [AWS account][aws] with API access
+- A set of temporary credentials issued via [ALKS][alks], or locally configured [AWS credentials][aws-credentials] with appropriate IAM access to create the resources.
+- A keypair for SSH access to EC2 instances.  Look here to learn how to [create a keypair][keypair] in AWS
+- Docker images of your services uploaded to [Docker Hub][docker-hub]
+- Download and install [terraform][terraform]
+
+The easiest way to get the Stack up and running is by creating a Terraform definition for it, create a directory (or include within your project directory) and copy this snippet into a file named `terraform.tf`:
+
+```hcl
+provider "aws" {
+  region = "us-east-1"
+}
+module "stack" {
+  source      = "git::https://Michael-Morianos:dfb41e0f7eeaad0d9b36e52f3d850f96d836b54c@ghe.coxautoinc.com/ETS-CloudAutomation/coxauto-terraform-modules"
+  environment = "dev"
+  key_name    = "mm-keypair"
+  name        = "coxauto-full-stack-lab25"
+}
+```
+
+This is the _default_ or _full_ stack, meaning it will provision everything you need to run your services.  Look at main.tf at the base of the project to get a sense of what it will do in detail.
 
 From there, you'll want to plan, which will stage the changeset
 
@@ -61,10 +188,10 @@ Here's a sample service definition, try adding it to your `terraform.tf` file.
 ```hcl
 module "nginx" {
   # this sources from the "stack//service" module
-  source          = "github.com/segmentio/stack//service"
+  source          = "git::https://Michael-Morianos:dfb41e0f7eeaad0d9b36e52f3d850f96d836b54c@ghe.coxautoinc.com/ETS-CloudAutomation/coxauto-terraform-modules//service"
   name            = "my-app"
   image           = "nginx"
-  port            = 80
+  port            = "80"
   environment     = "${module.stack.environment}"
   cluster         = "${module.stack.cluster}"
   iam_role        = "${module.stack.iam_role}"
@@ -86,16 +213,6 @@ Your service should automatically be up and running. You can SSH into your basti
     $ curl http://nginx.stack.local/
 
 *The bastion IP should have been shown by the terraform output when it created the stack for the first time. If you missed it you can still get it from the AWS console.*
-
-## Requirements
-
-Before we start, you'll first need:
-
-- [ ] an [AWS account][aws] with API access
-- [ ] locally configured [AWS credentials][aws-credentials] or a tool like [aws-vault][aws-vault]
-- [ ] to [create a keypair][keypair] in AWS
-- [ ] Docker images of your services uploaded to [Docker Hub][docker-hub]
-- [ ] download and install [terraform][terraform]
 
 ## Architecture
 
@@ -151,7 +268,7 @@ To subdivide each availability zone into spaces for internal, external and to ha
       10.30.176.0/20 spare
 
 The VPC itself will contain a single network gateway to route
-traffic in and out of the different subnets. The Stack terraform will automatically create 3 separate [NAT Gateways][nat-gateway] in each of the different subnets.
+traffic in and out of the different subnets. The Stack terraform will automatically create 3 separate [NAT Gateways][nat-gateway], one in each of the different subnets.
 
 Traffic from each internal subnet to the outside world will run through the associated NAT gateway.
 
@@ -220,7 +337,7 @@ You can reference modules individually by name:
 
 ```hcl
 module "vpc" {
-  source             = "github.com/segmentio/stack//vpc"
+  source             = "git::https://Michael-Morianos:dfb41e0f7eeaad0d9b36e52f3d850f96d836b54c@ghe.coxautoinc.com/ETS-CloudAutomation/coxauto-terraform-modules//vpc"
   name               = "${var.name}"
   environment        = "${var.environment}"
   cidr               = "${var.cidr}"
@@ -229,6 +346,18 @@ module "vpc" {
   availability_zones = "${var.availability_zones}"
 }
 ```
+Note: you will need to provide the values for these variables, the simplest way is by creating a variables.tf file.  Here's a table with the required and optional inputs...
+
+| Name | Description | Default | Required |
+|------|-------------|:-----:|:-----:|
+| cidr | The CIDR block for the VPC. | - | yes |
+| external_subnets | Comma separated list of subnets | - | yes |
+| internal_subnets | Comma separated list of subnets | - | yes |
+| environment | Environment tag, e.g prod | - | yes |
+| availability_zones | Comma separated list of availability zones | - | yes |
+| name | Name tag, e.g stack | `"stack"` | no |
+
+Details for all modules can be found on the [reference page](./docs.md).
 
 ## Developing
 
@@ -248,17 +377,9 @@ Stack is all vanilla Terraform and AWS, so you can customize it by simply forkin
 
 ## Examples
 
-To dig further down into what you can build with the Segment Stack we have put together an example app that shows how to configure a small infrastructure from scratch:
+To dig further down into what you can build with the Cox Auto aWS Stack the folks at Segmebnt have put together an example app that shows how to configure a small infrastructure from scratch:
 
 - https://github.com/segmentio/pingdummy
-
-## Authors
-
-- [Calvin French-Owen](https://github.com/calvinfo)
-- [Amir Abu Shareb](https://github.com/yields)
-- [Achille Roussel](https://github.com/achille-roussel)
-- [Kevin Lo](https://github.com/liquidy)
-- [Rick Branson](https://github.com/rbranson)
 
 ## License
 
